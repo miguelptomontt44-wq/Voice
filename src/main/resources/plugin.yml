@@ -1,0 +1,15 @@
+name: ProxVoice
+version: '1.0.0'
+main: dev.proxvoice.ProxVoicePlugin
+api-version: '26.3'
+description: Chat de voz por proximidad (cliente en el navegador, sin mods)
+libraries:
+  - org.java-websocket:Java-WebSocket:1.5.7
+commands:
+  voice:
+    description: Obtiene tu enlace de chat de voz
+    usage: /voice [mute]
+    permission: proxvoice.use
+permissions:
+  proxvoice.use:
+    default: true

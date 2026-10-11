@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ProxVoice</title>
+<style>
+  body{font-family:system-ui,sans-serif;background:#16181d;color:#e8e8e8;max-width:460px;margin:40px auto;padding:0 16px}
+  h1{font-size:1.4rem}
+  button{background:#3b82f6;color:#fff;border:0;border-radius:8px;padding:10px 16px;font-size:1rem;cursor:pointer}
+  button.off{background:#dc2626}
+  .row{margin:14px 0;display:flex;gap:10px;align-items:center}
+  label{min-width:120px}
+  input[type=range],progress,select{flex:1}
+  #status{padding:10px;border-radius:8px;background:#232730}
+</style>
+</head>
+<body>
+<h1>🎙️ ProxVoice</h1>
+<div id="status">Pulsa «Conectar» para empezar.</div>
+<div class="row"><button id="go">Conectar</button><button id="mute" disabled>Silenciar micro</button></div>
+<div class="row"><label>Micrófono</label><progress id="meter" max="1" value="0"></progress></div>
+<div class="row"><label>Modo</label>
+  <select id="mode"><option value="vad">Activación por voz</option><option value="ptt">Pulsar para hablar (tecla V)</option></select></div>
+<div class="row"><label>Sensibilidad</label><input id="thr" type="range" min="2" max="100" value="15"></div>
+<div class="row"><label>Volumen</label><input id="vol" type="range" min="0" max="150" value="100"></div>
+<p id="tx" style="color:#9ca3af">Usa auriculares para evitar eco.</p>
+
+<script>
+const $ = id => document.getElementById(id);
+const qs = new URLSearchParams(location.search);
+const token = qs.get('token');
+const wsUrl = qs.get('ws') || ((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+const status = t => $('status').textContent = t;
+
+let ctx, master, ws, muted = false, pttDown = false, hang = 0;
+const speakers = new Map();
+
+// Procesador de captura: baja a 16 kHz y emite frames de 320 muestras (20 ms) en Int16
+const workletSrc = `
+class Cap extends AudioWorkletProcessor {
+  constructor(){ super(); this.ratio = sampleRate/16000; this.acc=0; this.sum=0; this.cnt=0;
+    this.out=new Int16Array(320); this.n=0; }
+  process(inputs){
+    const ch = inputs[0][0]; if(!ch) return true;
+    for(let i=0;i<ch.length;i++){
+      this.sum += ch[i]; this.cnt++; this.acc++;
+      if(this.acc >= this.ratio){
+        this.acc -= this.ratio;
+        let v = this.sum/this.cnt; this.sum=0; this.cnt=0;
+        v = Math.max(-1, Math.min(1, v));
+        this.out[this.n++] = v < 0 ? v*32768 : v*32767;
+        if(this.n === 320){ const b = this.out.slice().buffer; this.port.postMessage(b,[b]); this.n=0; }
+      }
+    }
+    return true;
+  }
+}
+registerProcessor('cap', Cap);`;
+
+$('go').onclick = async () => {
+  if (!token) return status('Falta el token. Escribe /voice en Minecraft y abre el enlace.');
+  try {
+    ctx = new AudioContext({ latencyHint: 'interactive' });
+    master = ctx.createGain();
+    master.connect(ctx.destination);
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 }
+    });
+    await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([workletSrc], { type: 'application/javascript' })));
+    const node = new AudioWorkletNode(ctx, 'cap');
+    ctx.createMediaStreamSource(stream).connect(node);
+    const silent = ctx.createGain(); silent.gain.value = 0;
+    node.connect(silent); silent.connect(ctx.destination);
+    node.port.onmessage = e => onFrame(e.data);
+    $('go').disabled = true; $('mute').disabled = false;
+    connect();
+  } catch (err) {
+    status('Error: ' + err.message + (location.protocol === 'http:' && location.hostname !== 'localhost'
+      ? ' (el micrófono requiere HTTPS)' : ''));
+  }
+};
+
+function connect() {
+  ws = new WebSocket(wsUrl);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => ws.send(JSON.stringify({ type: 'auth', token }));
+  ws.onmessage = e => {
+    if (typeof e.data === 'string') {
+      const m = JSON.parse(e.data);
+      status(m.type === 'ready' ? '✅ Conectado como ' + m.name : '❌ ' + m.message);
+    } else play(e.data);
+  };
+  ws.onclose = () => status('Desconectado. Recarga la página o usa /voice.');
+}
+
+function onFrame(buf) {
+  const s = new Int16Array(buf);
+  let sum = 0; for (const v of s) sum += v * v;
+  const rms = Math.sqrt(sum / s.length) / 32768;
+  $('meter').value = Math.min(1, rms * 8);
+  let open = $('mode').value === 'ptt' ? pttDown : rms > $('thr').value / 1000;
+  if (open) hang = 10; else if (hang > 0) { hang--; open = true; }
+  const sending = open && !muted && ws && ws.readyState === 1;
+  if (sending) ws.send(buf);
+  $('tx').textContent = muted ? '🔇 Silenciado' : sending ? '🎙️ Hablando…' : 'Usa auriculares para evitar eco.';
+}
+
+function play(ab) {
+  const dv = new DataView(ab);
+  const id = dv.getInt32(0, true), gain = dv.getFloat32(4, true), pan = dv.getFloat32(8, true);
+  const n = (ab.byteLength - 12) >> 1;
+  const f = new Float32Array(n);
+  for (let i = 0; i < n; i++) f[i] = dv.getInt16(12 + i * 2, true) / 32768;
+
+  let sp = speakers.get(id);
+  if (!sp) {
+    sp = { next: 0, g: ctx.createGain(), p: ctx.createStereoPanner() };
+    sp.g.connect(sp.p); sp.p.connect(master);
+    speakers.set(id, sp);
+  }
+  sp.g.gain.setTargetAtTime(gain, ctx.currentTime, 0.02);
+  sp.p.pan.setTargetAtTime(pan, ctx.currentTime, 0.02);
+
+  const b = ctx.createBuffer(1, n, 16000);
+  b.copyToChannel(f, 0);
+  const src = ctx.createBufferSource();
+  src.buffer = b; src.connect(sp.g);
+  const now = ctx.currentTime;
+  if (sp.next < now || sp.next - now > 0.4) sp.next = now + 0.08; // buffer anti-cortes de 80 ms
+  src.start(sp.next);
+  sp.next += b.duration;
+}
+
+$('mute').onclick = () => {
+  muted = !muted;
+  $('mute').textContent = muted ? 'Activar micro' : 'Silenciar micro';
+  $('mute').classList.toggle('off', muted);
+};
+$('vol').oninput = () => { if (master) master.gain.value = $('vol').value / 100; };
+addEventListener('keydown', e => { if (e.code === 'KeyV') pttDown = true; });
+addEventListener('keyup', e => { if (e.code === 'KeyV') pttDown = false; });
+</script>
+</body>
+</html>

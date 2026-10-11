@@ -1,0 +1,19 @@
+# Direccion donde escuchan los servidores internos (0.0.0.0 = todas las interfaces)
+bind-address: "0.0.0.0"
+# Puerto de la pagina web (HTTP)
+web-port: 8080
+# Puerto del WebSocket (audio)
+ws-port: 8081
+
+# URLs que ven los jugadores.
+# Para probar en tu PC:   http://localhost:8080  y  ws://localhost:8081
+# Para servidor real (HTTPS obligatorio, ver guia):
+#   public-url:    https://voz.midominio.com
+#   ws-public-url: wss://voz.midominio.com/ws
+public-url: "http://localhost:8080"
+ws-public-url: "ws://localhost:8081"
+
+# Distancia maxima (bloques) a la que se oye a otro jugador
+max-distance: 48.0
+# Hasta esta distancia se oye al 100% de volumen
+full-volume-distance: 4.0
